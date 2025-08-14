@@ -137,7 +137,7 @@ class Convttention(nn.Module):
         super().__init__()
 
         self.mobilenet = nn.Sequential(
-            MobileNetBlock(d_in, d_out, 3, 1, 1, 1, padding_mode="replicate"),
+            MobileNetBlock(d_in + 1, d_out, 3, 1, 1, 1, padding_mode="replicate"),
             *[
                 MobileNetBlock(d_out, d_out, 3, 1, base**i, base**i)
                 for i in range(1, depth + 1)
@@ -153,18 +153,28 @@ class Convttention(nn.Module):
         )
         self.d_model = d_out
 
-    def forward(self, x):
-        # The input x is expected to be a single tensor
-        # with shape [bs, ds, sl, features]
-        # Sort by time if time is the first feature
-        for_sort = x[..., 0:1].argsort(dim=-2)
-        n_features = x.shape[-1]
-        gathered = x.gather(dim=-2, index=for_sort.repeat(1, 1, 1, n_features))
-        mobilenet_out = self.mobilenet(gathered)
+    def forward(self, history_T, history_V, prompt_T=None):
+        for_sort = torch.cat(
+            [history_T] + ([prompt_T] if prompt_T is not None else []), dim=-2
+        ).argsort(dim=-2)
+        history = torch.cat([history_T, history_V, torch.zeros_like(history_T)], dim=-1)
+        if prompt_T is not None:
+            prompt = torch.cat(
+                [prompt_T, torch.zeros_like(prompt_T), torch.ones_like(prompt_T)],
+                dim=-1,
+            )
+            history = torch.cat([history, prompt], dim=-2)
         output = self.mlp(
-            mobilenet_out
+            self.mobilenet(history.gather(dim=-2, index=for_sort.repeat(1, 1, 1, 3)))
         ).gather(dim=-2, index=for_sort.argsort(dim=-2).repeat(1, 1, 1, self.d_model))
-        return output
+        if prompt_T is not None:
+            prompt_dim = prompt_T.shape[-2]
+            return (
+                output[..., :-prompt_dim, :],
+                output[..., -prompt_dim:, :],
+            )
+        else:
+            return output, None
 
 
 class ScheduledEma(float):
@@ -237,15 +247,22 @@ class LaTPFNV4(nn.Module):
         **kwargs
     ):
         super().__init__()
+
+        print("Ignoring kwargs:", self, kwargs)
+        print("d_model", d_model)
+        print("using mup parametrization", use_mup_parametrization)
+
+        self.n_outputs = n_outputs
         self.train_noise = train_noise
 
-        # --- The Fix: Part 1 ---
-        # Create an embedding layer to project 41 features down to 1
+        # --- FIX Part 1: ADD the embedding layer ---
         self.value_embedder = nn.Linear(shape.n_features, 1)
-        # The main encoder now expects 2 features (1 time + 1 embedded value)
+
+        # --- FIX Part 2: CHANGE d_in for Convttention to 1 ---
         self.TS_encoder = Convttention(
-            2, d_model, base=2, depth=8, use_mup_parametrization=use_mup_parametrization
+            1, d_model, base=2, depth=8, use_mup_parametrization=use_mup_parametrization
         )
+
         self.ts_ema_constant = ScheduledEma(
             value=torch.scalar_tensor(ema_decay, dtype=torch.float64)
         )
@@ -327,40 +344,23 @@ class LaTPFNV4(nn.Module):
         backcast: bool = False,
         **kwargs
     ):
-        # --- The Fix: Part 2 ---
-        # Apply the value embedding to all V tensors
+        # --- FIX Part 3: Apply the embedding layer to all V tensors FIRST ---
         V_context_history = self.value_embedder(V_context_history)
         V_context_prompt = self.value_embedder(V_context_prompt)
         V_heldout_history = self.value_embedder(V_heldout_history)
         if V_heldout_prompt is not None:
             V_heldout_prompt = self.value_embedder(V_heldout_prompt)
 
-        # --- Prepare Inputs (this logic is now correct) ---
-        context_full = torch.cat([
-            torch.cat([T_context_history, V_context_history], dim=-1),
-            torch.cat([T_context_prompt, V_context_prompt], dim=-1)
-        ], dim=-2)
-
-        v_placeholder = torch.zeros_like(V_heldout_history)
-        heldout_with_prompt_placeholder = torch.cat([
-            torch.cat([T_heldout_history, V_heldout_history], dim=-1),
-            torch.cat([T_heldout_prompt, v_placeholder], dim=-1)
-        ], dim=-2)
-
-        # --- Embed ---
-        embedding_context = self.TS_encoder(context_full)
+        # --- The original logic now works because V tensors are the correct shape ---
+        embedding_context, _ = self.TS_encoder(
+            torch.cat([T_context_history, T_context_prompt], dim=-2),
+            torch.cat([V_context_history, V_context_prompt], dim=-2),
+        )
         mean_context = self.avg_pool(self.proj(embedding_context))
-        
-        embedding_heldout = self.TS_encoder(heldout_with_prompt_placeholder)
-        
-        # Correctly split the history from the prompt part of the embedding
-        history_len = T_heldout_history.shape[-2]
-        prompt = embedding_heldout[:, :, history_len:, :]
-        embedding_heldout_history = embedding_heldout[:, :, :history_len, :]
-
-        # --- Predict ---
+        embedding_heldout_history, prompt = self.TS_encoder(
+            T_heldout_history, V_heldout_history, T_heldout_prompt
+        )
         pred = self.pfn(mean_context, prompt)
-
         noise_fn = torch.randn_like if self.training else torch.zeros_like
         noise = noise_fn(pred.detach()) * self.train_noise
         prediction_raw = self.head_raw(pred.detach() + noise)
@@ -368,12 +368,13 @@ class LaTPFNV4(nn.Module):
 
         if predict_all_heads:
             with torch.no_grad():
-                ema_input = torch.cat([
-                    torch.cat([T_heldout_history, V_heldout_history], dim=-1),
-                    torch.cat([T_heldout_prompt, V_heldout_prompt], dim=-1)
-                ], dim=-2)
-                ema = self.TS_ema(ema_input)
-                returnables["latent_target"] = ema[:, :, -V_heldout_prompt.shape[-2] :, :]
+                ema = self.TS_ema(
+                    torch.cat([T_heldout_history, T_heldout_prompt], dim=-2),
+                    torch.cat([V_heldout_history, V_heldout_prompt], dim=-2),
+                )[0]
+                returnables["latent_target"] = ema[
+                    :, :, -V_heldout_prompt.shape[-2] :, :
+                ]
                 returnables["latent_full"] = ema
                 returnables["latent_history"] = embedding_heldout_history
                 returnables["bypass"] = prompt
