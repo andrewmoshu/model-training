@@ -293,6 +293,8 @@ class LaTPFNV4(nn.Module):
             1, d_model, base=2, depth=8, use_mup_parametrization=use_mup_parametrization
         )
 
+        # Y-embedder (EMA of X-embedder)
+
         self.ts_ema_constant = ScheduledEma(
             value=torch.scalar_tensor(ema_decay, dtype=torch.float64)
         )
@@ -404,7 +406,6 @@ class LaTPFNV4(nn.Module):
         with torch.no_grad():
             returnables = {}
 
-            V = self.value_embedder(V)
             ema_output = self.TS_ema(T, V)[0]
 
             returnables["per_timestep_embedding"] = ema_output
@@ -528,10 +529,6 @@ class LaTPFNV4(nn.Module):
 
         with torch.no_grad():
 
-            V_context_history = self.value_embedder(V_context_history)
-            V_context_prompt = self.value_embedder(V_context_prompt)
-            V_heldout_history = self.value_embedder(V_heldout_history)
-
             # embed context
 
             embedding_context, _ = self.TS_encoder(
@@ -580,6 +577,7 @@ class LaTPFNV4(nn.Module):
         Util method used by training, eval and inference scripts. Not part of public API.
         """
 
+        # Apply the value embedding to all V tensors FIRST
         V_context_history = self.value_embedder(V_context_history)
         V_context_prompt = self.value_embedder(V_context_prompt)
         V_heldout_history = self.value_embedder(V_heldout_history)
