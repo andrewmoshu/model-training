@@ -151,9 +151,20 @@ class Convttention(nn.Module):
             ),
             nn.Linear(d_out, d_out),
         )
+        self.d_model = d_out
 
     def forward(self, x):
-        return self.mlp(self.mobilenet(x))
+        # The input x is expected to be a single tensor
+        # with shape [bs, ds, sl, features]
+        # Sort by time if time is the first feature
+        for_sort = x[..., 0:1].argsort(dim=-2)
+        n_features = x.shape[-1]
+        gathered = x.gather(dim=-2, index=for_sort.repeat(1, 1, 1, n_features))
+        mobilenet_out = self.mobilenet(gathered)
+        output = self.mlp(
+            mobilenet_out
+        ).gather(dim=-2, index=for_sort.argsort(dim=-2).repeat(1, 1, 1, self.d_model))
+        return output
 
 
 class ScheduledEma(float):
@@ -294,20 +305,21 @@ class LaTPFNV4(nn.Module):
         backcast: bool = False,
         **kwargs
     ):
+        # --- Prepare Inputs ---
         context_full = torch.cat([
             torch.cat([T_context_history, V_context_history], dim=-1),
             torch.cat([T_context_prompt, V_context_prompt], dim=-1)
         ], dim=-2)
 
         v_placeholder = torch.zeros(
-            *T_heldout_prompt.shape[:-1], V_heldout_history.shape[-1], device=T_heldout_prompt.device
+            *T_heldout_prompt.shape[:-1], 1, device=T_heldout_prompt.device
         )
-
         heldout_with_prompt_placeholder = torch.cat([
             torch.cat([T_heldout_history, V_heldout_history], dim=-1),
             torch.cat([T_heldout_prompt, v_placeholder], dim=-1)
         ], dim=-2)
 
+        # --- Embed ---
         embedding_context = self.TS_encoder(context_full)
         mean_context = self.avg_pool(self.proj(embedding_context))
         
@@ -316,6 +328,7 @@ class LaTPFNV4(nn.Module):
         prompt = embedding_heldout[:, :, -T_heldout_prompt.shape[-2]:, :]
         embedding_heldout_history = embedding_heldout[:, :, :-T_heldout_prompt.shape[-2], :]
 
+        # --- Predict ---
         pred = self.pfn(mean_context, prompt)
 
         noise_fn = torch.randn_like if self.training else torch.zeros_like
