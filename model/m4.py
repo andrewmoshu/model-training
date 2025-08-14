@@ -299,12 +299,9 @@ class LaTPFNV4(nn.Module):
             torch.cat([T_context_prompt, V_context_prompt], dim=-1)
         ], dim=-2)
 
-        v_placeholder = torch.zeros_like(V_context_history) # Use a tensor with a known correct shape
-        
-        # This part is tricky, let's rebuild the placeholder with the prompt's sequence length
-        prompt_shape = list(v_placeholder.shape)
-        prompt_shape[2] = T_heldout_prompt.shape[2]
-        v_placeholder = torch.zeros(prompt_shape, device=T_heldout_prompt.device)
+        v_placeholder = torch.zeros(
+            *T_heldout_prompt.shape[:-1], V_heldout_history.shape[-1], device=T_heldout_prompt.device
+        )
 
         heldout_with_prompt_placeholder = torch.cat([
             torch.cat([T_heldout_history, V_heldout_history], dim=-1),
