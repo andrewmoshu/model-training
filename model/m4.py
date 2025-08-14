@@ -129,11 +129,9 @@ class Convttention(nn.Module):
     def __init__(self, d_in, d_out, base=2, depth=8, use_mup_parametrization=True):
         super().__init__()
 
-        # FIX: The internal logic of this block's forward pass ALWAYS creates a 3-feature tensor.
-        # We hardcode the input to the first MobileNetBlock to be 3,
-        # which fixes a bug in the original code and makes the `d_in` parameter work as intended.
+        # Accept multivariate V: first block input channels = time(1) + V(d_in) + mask(1)
         self.mobilenet = nn.Sequential(
-            MobileNetBlock(3, d_out, 3, 1, 1, 1, padding_mode="replicate"),
+            MobileNetBlock(d_in + 2, d_out, 3, 1, 1, 1, padding_mode="replicate"),
             *[
                 MobileNetBlock(d_out, d_out, 3, 1, base**i, base**i)
                 for i in range(1, depth + 1)
@@ -174,8 +172,9 @@ class Convttention(nn.Module):
 
         # push through the network and undo the sorting
 
+        channels = history.shape[-1]
         output = self.mlp(
-            self.mobilenet(history.gather(dim=-2, index=for_sort.repeat(1, 1, 1, 3)))
+            self.mobilenet(history.gather(dim=-2, index=for_sort.repeat(1, 1, 1, channels)))
         ).gather(dim=-2, index=for_sort.argsort(dim=-2).repeat(1, 1, 1, self.d_model))
 
         # split the forecast from the embeddings
@@ -290,11 +289,9 @@ class LaTPFNV4(nn.Module):
         self.n_outputs = n_outputs
         self.train_noise = train_noise
 
-        self.value_embedder = nn.Linear(shape.n_features, 1)
-
-        # X-embedder now takes a d_in of 1, because our V tensors will be projected down to 1 feature.
+        # Multivariate V: pass number of features to the encoder
         self.TS_encoder = Convttention(
-            1, d_model, base=2, depth=8, use_mup_parametrization=use_mup_parametrization
+            shape.n_features, d_model, base=2, depth=8, use_mup_parametrization=use_mup_parametrization
         )
 
         # Y-embedder (EMA of X-embedder)
@@ -382,12 +379,10 @@ class LaTPFNV4(nn.Module):
                 - "per_series_summary_embedding":   [batch_size, context_size, d_model]
         """
 
-        # verify inputs
-
-        assert T.shape == V.shape, "T and V must have the same shape"
-        assert (
-            len(T.shape) == 4
-        ), "T and V must have shape [batch_size, context_size, sequence_length, 1]"
+        # verify inputs (allow multivariate V)
+        assert len(T.shape) == 4 and len(V.shape) == 4, "T and V must be 4D"
+        assert T.shape[:-1] == V.shape[:-1], "T and V batch/context/length must match"
+        assert T.shape[-1] == 1, "T last dim must be 1"
         assert not self.training, "This method should only be called in eval mode"
         assert (
             torch.isnan(T).sum() == 0 and torch.isnan(V).sum() == 0
@@ -500,16 +495,14 @@ class LaTPFNV4(nn.Module):
             == T_heldout_prompt.shape[2]
         ), "All future inputs must have the same sequence length"
 
+        # last dim can differ between T (1) and V (n_features); enforce only T last dim == 1
         assert (
             T_context_history.shape[3]
             == T_context_prompt.shape[3]
-            == V_context_history.shape[3]
-            == V_context_prompt.shape[3]
             == T_heldout_history.shape[3]
             == T_heldout_prompt.shape[3]
-            == V_heldout_history.shape[3]
             == 1
-        ), "All inputs must have the same number of features"
+        ), "Time tensors must have last dim 1"
 
         assert all([x > 1 for x in V_heldout_history.shape[:-1]]) and all(
             [x > 1 for x in T_context_prompt.shape[:-1]]
