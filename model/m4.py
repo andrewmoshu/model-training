@@ -129,9 +129,9 @@ class Convttention(nn.Module):
     def __init__(self, d_in, d_out, base=2, depth=8, use_mup_parametrization=True):
         super().__init__()
 
-        # FIX: The internal logic of this block ALWAYS creates a 3-feature tensor.
+        # FIX: The internal logic of this block's forward pass ALWAYS creates a 3-feature tensor.
         # We hardcode the input to the first MobileNetBlock to be 3,
-        # making the `d_in` parameter work as intended for the V tensor.
+        # which fixes a bug in the original code and makes the `d_in` parameter work as intended.
         self.mobilenet = nn.Sequential(
             MobileNetBlock(3, d_out, 3, 1, 1, 1, padding_mode="replicate"),
             *[
@@ -292,8 +292,7 @@ class LaTPFNV4(nn.Module):
 
         self.value_embedder = nn.Linear(shape.n_features, 1)
 
-        # X-embedder
-
+        # X-embedder now takes a d_in of 1, because our V tensors will be projected down to 1 feature.
         self.TS_encoder = Convttention(
             1, d_model, base=2, depth=8, use_mup_parametrization=use_mup_parametrization
         )
@@ -410,9 +409,6 @@ class LaTPFNV4(nn.Module):
 
         with torch.no_grad():
             returnables = {}
-
-            # Apply the value embedding to V
-            V = self.value_embedder(V)
 
             ema_output = self.TS_ema(T, V)[0]
 
@@ -537,11 +533,6 @@ class LaTPFNV4(nn.Module):
 
         with torch.no_grad():
 
-            # Apply the value embedding to all V tensors FIRST
-            V_context_history = self.value_embedder(V_context_history)
-            V_context_prompt = self.value_embedder(V_context_prompt)
-            V_heldout_history = self.value_embedder(V_heldout_history)
-
             # embed context
 
             embedding_context, _ = self.TS_encoder(
@@ -590,13 +581,6 @@ class LaTPFNV4(nn.Module):
         Util method used by training, eval and inference scripts. Not part of public API.
         """
 
-        # Apply the value embedding to all V tensors FIRST
-        V_context_history = self.value_embedder(V_context_history)
-        V_context_prompt = self.value_embedder(V_context_prompt)
-        V_heldout_history = self.value_embedder(V_heldout_history)
-        if V_heldout_prompt is not None:
-            V_heldout_prompt = self.value_embedder(V_heldout_prompt)
-
         # embed context
 
         embedding_context, _ = self.TS_encoder(
@@ -631,7 +615,7 @@ class LaTPFNV4(nn.Module):
 
                 ema = self.TS_ema(
                     torch.cat([T_heldout_history, T_heldout_prompt], dim=-2),
-                    torch.cat([V_context_history, V_heldout_prompt], dim=-2),
+                    torch.cat([V_heldout_history, V_heldout_prompt], dim=-2),
                 )[0]
 
                 returnables["latent_target"] = ema[
