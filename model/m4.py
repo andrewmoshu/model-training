@@ -296,6 +296,23 @@ class LaTPFNV4(nn.Module):
             1.0,
         )
 
+    def create_embeddings(
+        self, T: torch.Tensor, V: torch.Tensor, supress_warnings: bool = False
+    ) -> dict[str, torch.Tensor]:
+        # ... (assertions) ...
+        with torch.no_grad():
+            returnables = {}
+            
+            # --- The Fix ---
+            # Apply the value embedding before concatenation
+            V = self.value_embedder(V)
+            full_input = torch.cat([T, V], dim=-1)
+
+            ema_output = self.TS_ema(full_input)
+
+            returnables["per_timestep_embedding"] = ema_output
+            # ... (rest of the function)
+
     def forward(
         self,
         T_context_history,
@@ -336,8 +353,10 @@ class LaTPFNV4(nn.Module):
         
         embedding_heldout = self.TS_encoder(heldout_with_prompt_placeholder)
         
-        prompt = embedding_heldout[:, :, -T_heldout_prompt.shape[-2]:, :]
-        embedding_heldout_history = embedding_heldout[:, :, :-T_heldout_prompt.shape[-2], :]
+        # Correctly split the history from the prompt part of the embedding
+        history_len = T_heldout_history.shape[-2]
+        prompt = embedding_heldout[:, :, history_len:, :]
+        embedding_heldout_history = embedding_heldout[:, :, :history_len, :]
 
         # --- Predict ---
         pred = self.pfn(mean_context, prompt)
