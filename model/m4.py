@@ -406,6 +406,7 @@ class LaTPFNV4(nn.Module):
         with torch.no_grad():
             returnables = {}
 
+            V = self.value_embedder(V)
             ema_output = self.TS_ema(T, V)[0]
 
             returnables["per_timestep_embedding"] = ema_output
@@ -531,6 +532,8 @@ class LaTPFNV4(nn.Module):
 
             # embed context
 
+            V_context_history = self.value_embedder(V_context_history)
+            V_context_prompt = self.value_embedder(V_context_prompt)
             embedding_context, _ = self.TS_encoder(
                 torch.cat([T_context_history, T_context_prompt], dim=-2),
                 torch.cat([V_context_history, V_context_prompt], dim=-2),
@@ -539,6 +542,7 @@ class LaTPFNV4(nn.Module):
 
             # embed heldout
 
+            V_heldout_history = self.value_embedder(V_heldout_history)
             embedding_heldout_history, prompt = self.TS_encoder(
                 T_heldout_history, V_heldout_history, T_heldout_prompt
             )
