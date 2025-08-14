@@ -129,8 +129,11 @@ class Convttention(nn.Module):
     def __init__(self, d_in, d_out, base=2, depth=8, use_mup_parametrization=True):
         super().__init__()
 
+        # FIX: The internal logic of this block ALWAYS creates a 3-feature tensor.
+        # We hardcode the input to the first MobileNetBlock to be 3,
+        # making the `d_in` parameter work as intended for the V tensor.
         self.mobilenet = nn.Sequential(
-            MobileNetBlock(d_in + 1, d_out, 3, 1, 1, 1, padding_mode="replicate"),
+            MobileNetBlock(3, d_out, 3, 1, 1, 1, padding_mode="replicate"),
             *[
                 MobileNetBlock(d_out, d_out, 3, 1, base**i, base**i)
                 for i in range(1, depth + 1)
@@ -289,6 +292,8 @@ class LaTPFNV4(nn.Module):
 
         self.value_embedder = nn.Linear(shape.n_features, 1)
 
+        # X-embedder
+
         self.TS_encoder = Convttention(
             1, d_model, base=2, depth=8, use_mup_parametrization=use_mup_parametrization
         )
@@ -406,7 +411,9 @@ class LaTPFNV4(nn.Module):
         with torch.no_grad():
             returnables = {}
 
+            # Apply the value embedding to V
             V = self.value_embedder(V)
+
             ema_output = self.TS_ema(T, V)[0]
 
             returnables["per_timestep_embedding"] = ema_output
@@ -530,10 +537,13 @@ class LaTPFNV4(nn.Module):
 
         with torch.no_grad():
 
-            # embed context
-
+            # Apply the value embedding to all V tensors FIRST
             V_context_history = self.value_embedder(V_context_history)
             V_context_prompt = self.value_embedder(V_context_prompt)
+            V_heldout_history = self.value_embedder(V_heldout_history)
+
+            # embed context
+
             embedding_context, _ = self.TS_encoder(
                 torch.cat([T_context_history, T_context_prompt], dim=-2),
                 torch.cat([V_context_history, V_context_prompt], dim=-2),
@@ -542,7 +552,6 @@ class LaTPFNV4(nn.Module):
 
             # embed heldout
 
-            V_heldout_history = self.value_embedder(V_heldout_history)
             embedding_heldout_history, prompt = self.TS_encoder(
                 T_heldout_history, V_heldout_history, T_heldout_prompt
             )
