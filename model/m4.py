@@ -238,8 +238,13 @@ class LaTPFNV4(nn.Module):
     ):
         super().__init__()
         self.train_noise = train_noise
+
+        # --- The Fix: Part 1 ---
+        # Create an embedding layer to project 41 features down to 1
+        self.value_embedder = nn.Linear(shape.n_features, 1)
+        # The main encoder now expects 2 features (1 time + 1 embedded value)
         self.TS_encoder = Convttention(
-            shape.n_features + 1, d_model, base=2, depth=8, use_mup_parametrization=use_mup_parametrization
+            2, d_model, base=2, depth=8, use_mup_parametrization=use_mup_parametrization
         )
         self.ts_ema_constant = ScheduledEma(
             value=torch.scalar_tensor(ema_decay, dtype=torch.float64)
@@ -305,15 +310,21 @@ class LaTPFNV4(nn.Module):
         backcast: bool = False,
         **kwargs
     ):
-        # --- Prepare Inputs ---
+        # --- The Fix: Part 2 ---
+        # Apply the value embedding to all V tensors
+        V_context_history = self.value_embedder(V_context_history)
+        V_context_prompt = self.value_embedder(V_context_prompt)
+        V_heldout_history = self.value_embedder(V_heldout_history)
+        if V_heldout_prompt is not None:
+            V_heldout_prompt = self.value_embedder(V_heldout_prompt)
+
+        # --- Prepare Inputs (this logic is now correct) ---
         context_full = torch.cat([
             torch.cat([T_context_history, V_context_history], dim=-1),
             torch.cat([T_context_prompt, V_context_prompt], dim=-1)
         ], dim=-2)
 
-        v_placeholder = torch.zeros(
-            *T_heldout_prompt.shape[:-1], 1, device=T_heldout_prompt.device
-        )
+        v_placeholder = torch.zeros_like(V_heldout_history)
         heldout_with_prompt_placeholder = torch.cat([
             torch.cat([T_heldout_history, V_heldout_history], dim=-1),
             torch.cat([T_heldout_prompt, v_placeholder], dim=-1)
