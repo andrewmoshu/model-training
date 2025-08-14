@@ -163,10 +163,13 @@ class Convttention(nn.Module):
         # add the prompt if it exists
 
         if prompt_T is not None:
-            prompt = torch.cat(
-                [prompt_T, torch.zeros_like(prompt_T), torch.ones_like(prompt_T)],
-                dim=-1,
+            # build a zero placeholder for V with same feature dimension as history_V
+            v_dim = history_V.shape[-1]
+            zeros_v = torch.zeros(
+                *prompt_T.shape[:-1], v_dim, device=prompt_T.device, dtype=history_V.dtype
             )
+            ones_mask = torch.ones_like(prompt_T)
+            prompt = torch.cat([prompt_T, zeros_v, ones_mask], dim=-1)
 
             history = torch.cat([history, prompt], dim=-2)
 
